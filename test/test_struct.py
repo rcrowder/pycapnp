@@ -107,6 +107,14 @@ def test_builder_set(addressbook):
         person.foo = 'test'
 
 
+def test_builder_set_from_list(all_types):
+    msg = all_types.TestAllTypes.new_message()
+
+    msg.int32List = [0, 1, 2]
+
+    assert list(msg.int32List) == [0, 1, 2]
+
+
 def test_null_str(all_types):
     msg = all_types.TestAllTypes.new_message()
 
@@ -218,3 +226,16 @@ def test_to_dict_ordered(addressbook):
     else:
         with pytest.raises(Exception):
             person.to_dict(ordered=True)
+
+def test_nested_list(addressbook):
+    struct = addressbook.NestedList.new_message()
+    struct.init('list', 2)
+
+    struct.list.init(0, 1)
+    struct.list.init(1, 2)
+
+    struct.list[0][0] = 1
+    struct.list[1][0] = 2
+    struct.list[1][1] = 3
+
+    assert struct.to_dict()["list"] == [[1], [2,3]]

@@ -1,3 +1,33 @@
+## v0.5.7 (2015-06-16)
+- Update bundled libcapnp to v0.5.2
+- Add warnings for using old restorer methods. You should use `bootstrap` instead
+- Fix warning from PyEventPort
+- Handle AnyPointers better as arguments to RPC functions
+- Add support for using keyword arguments with a named struct in an RPC
+- Add bootstrap method to TwoPartyServer
+- Add `init` method to lists
+- Add support for unix sockets in RPC
+
+## v0.5.6 (2015-04-13)
+- Fix a serious bug in TwoPartyServer that was preventing it from working when passed a string address.
+- Fix bugs that were exposed by defining KJDEBUG (thanks @davidcarne for finding this)
+
+
+## v0.5.5 (2015-03-06)
+- Update bundled C++ libcapnp to v0.5.1.2 security release
+
+
+## v0.5.4 (2015-03-02)
+- Update bundled C++ libcapnp to v0.5.1.1 security release
+- Add bootstrap RPC methods
+- Fix possible segfault when importing multiple schemas
+
+
+## v0.5.3 (2015-02-23)
+- Fix possible crash due to bad destructor ordering in MessageReader (by @JohnEmhoff)
+- Default to no longer using cython
+
+
 ## v0.5.2 (2015-02-20)
 - Add read\_multiple\_bytes/read\_multiple\_bytes\_packed methods
 - Added Python 3.4 to the travis build matrix

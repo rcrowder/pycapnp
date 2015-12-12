@@ -343,3 +343,43 @@ def test_inheritance():
     response = remote.wait()
 
     assert response.x == '26'
+
+
+class TestPassedCap(capability.TestPassedCap.Server):
+    def foo(self, cap, _context, **kwargs):
+        def set_result(res):
+            _context.results.x = res.x
+        return cap.foo(5).then(set_result)
+
+
+def test_null_cap():
+    client = capability.TestPassedCap._new_client(TestPassedCap())
+    assert client.foo(Server()).wait().x == '26'
+
+    with pytest.raises(capnp.KjException):
+        client.foo().wait()
+
+
+class TestStructArg(capability.TestStructArg.Server):
+    def bar(self, a, b, **kwargs):
+        return a + str(b)
+
+
+def test_struct_args():
+    client = capability.TestStructArg._new_client(TestStructArg())
+    assert client.bar(a='test', b=1).wait().c == 'test1'
+    with pytest.raises(capnp.KjException):
+        assert client.bar('test', 1).wait().c == 'test1'
+
+
+class TestGeneric(capability.TestGeneric.Server):
+    def foo(self, a, **kwargs):
+        return a.as_text() + 'test'
+
+
+def test_generic():
+    client = capability.TestGeneric._new_client(TestGeneric())
+
+    obj = capnp._MallocMessageBuilder().get_root_as_any()
+    obj.set_as_text("anypointer_")
+    assert client.foo(obj).wait().b == 'anypointer_test'

@@ -207,6 +207,7 @@ class KjException(Exception):
             self.wrapper = wrapper
             self.message = str(wrapper)
         else:
+            self.wrapper = None
             self.message = message
             self.nature = nature
             self.durability = durability
@@ -301,11 +302,11 @@ cdef extern from "<utility>" namespace "std":
     capnp.AsyncIoContext moveAsyncContext"std::move"(capnp.AsyncIoContext)
 
 cdef extern from "<capnp/pretty-print.h>" namespace " ::capnp":
-    StringTree printStructReader" ::capnp::prettyPrint"(C_DynamicStruct.Reader)
-    StringTree printStructBuilder" ::capnp::prettyPrint"(DynamicStruct_Builder)
-    StringTree printRequest" ::capnp::prettyPrint"(Request &)
-    StringTree printListReader" ::capnp::prettyPrint"(C_DynamicList.Reader)
-    StringTree printListBuilder" ::capnp::prettyPrint"(C_DynamicList.Builder)
+    StringTree printStructReader" ::capnp::prettyPrint"(C_DynamicStruct.Reader) except +reraise_kj_exception
+    StringTree printStructBuilder" ::capnp::prettyPrint"(DynamicStruct_Builder) except +reraise_kj_exception
+    StringTree printRequest" ::capnp::prettyPrint"(Request &) except +reraise_kj_exception
+    StringTree printListReader" ::capnp::prettyPrint"(C_DynamicList.Reader) except +reraise_kj_exception
+    StringTree printListBuilder" ::capnp::prettyPrint"(C_DynamicList.Builder) except +reraise_kj_exception
 
 cdef class _NodeReader:
     cdef C_Node.Reader thisptr
@@ -534,6 +535,17 @@ cdef class _DynamicListBuilder:
         """
         return _DynamicOrphan()._init(self.thisptr.disown(index), self._parent)
 
+    cpdef init(self, index, size):
+        """A method for initializing an element in a list
+
+        :type index: int
+        :param index: The index of the element in the list
+
+        :type size: int
+        :param size: Size of the element to be initialized.
+        """
+        return to_python_builder(self.thisptr.init(index, size), self._parent)
+
     def __str__(self):
         return <char*>printListBuilder(self.thisptr).flatten().cStr()
 
@@ -650,6 +662,12 @@ cdef C_DynamicValue.Reader _extract_dynamic_server(object value):
 cdef C_DynamicValue.Reader _extract_dynamic_enum(_DynamicEnum value):
     return C_DynamicValue.Reader(value.thisptr)
 
+cdef C_DynamicValue.Reader _extract_any_pointer(_DynamicObjectReader value):
+    return C_DynamicValue.Reader(value.thisptr)
+
+cdef C_DynamicValue.Reader _extract_any_pointer_builder(_DynamicObjectBuilder value):
+    return C_DynamicValue.Reader(value.thisptr.asReader())
+
 cdef _setBytes(_DynamicSetterClasses thisptr, field, value):
     cdef capnp.StringPtr temp_string = capnp.StringPtr(<char*>value, len(value))
     cdef C_DynamicValue.Reader temp = C_DynamicValue.Reader(temp_string)
@@ -715,6 +733,10 @@ cdef _setDynamicField(_DynamicSetterClasses thisptr, field, value, parent):
         thisptr.set(field, _extract_dynamic_server(value))
     elif value_type is _DynamicEnum:
         thisptr.set(field, _extract_dynamic_enum(value))
+    elif value_type is _DynamicObjectReader:
+        thisptr.set(field, _extract_any_pointer(value))
+    elif value_type is _DynamicObjectBuilder:
+        thisptr.set(field, _extract_any_pointer_builder(value))
     else:
         raise KjException("Tried to set field: '{}' with a value of: '{}' which is an unsupported type: '{}'".format(field, str(value), str(type(value))))
 
@@ -757,6 +779,10 @@ cdef _setDynamicFieldWithField(DynamicStruct_Builder thisptr, _StructSchemaField
         thisptr.setByField(field.thisptr, _extract_dynamic_server(value))
     elif value_type is _DynamicEnum:
         thisptr.setByField(field.thisptr, _extract_dynamic_enum(value))
+    elif value_type is _DynamicObjectReader:
+        thisptr.set(field, _extract_any_pointer(value))
+    elif value_type is _DynamicObjectBuilder:
+        thisptr.set(field, _extract_any_pointer_builder(value))
     else:
         raise KjException("Tried to set field: '{}' with a value of: '{}' which is an unsupported type: '{}'".format(field, str(value), str(type(value))))
 
@@ -799,6 +825,10 @@ cdef _setDynamicFieldStatic(DynamicStruct_Builder thisptr, field, value, parent)
         thisptr.set(field, _extract_dynamic_server(value))
     elif value_type is _DynamicEnum:
         thisptr.set(field, _extract_dynamic_enum(value))
+    elif value_type is _DynamicObjectReader:
+        thisptr.set(field, _extract_any_pointer(value))
+    elif value_type is _DynamicObjectBuilder:
+        thisptr.set(field, _extract_any_pointer_builder(value))
     else:
         raise KjException("Tried to set field: '{}' with a value of: '{}' which is an unsupported type: '{}'".format(field, str(value), str(type(value))))
 
@@ -862,10 +892,10 @@ cdef _to_dict(msg, bint verbose, bint ordered):
 
     return msg
 
+
 cdef _from_list(_DynamicListBuilder msg, list d):
-    cdef size_t count = 0
-    for i in range(len(d)):
-        msg._set(i, d[i])
+    for i, x in enumerate(d):
+        msg._set(i, x)
 
 
 cdef class _DynamicEnum:
@@ -2039,7 +2069,7 @@ cdef class _DynamicCapabilityClient:
         return _find_field_order(params.struct)
 
     cdef _set_fields(self, Request * request, name, args, kwargs):
-        if args is not None:
+        if args is not None and len(args) > 0:
             arg_names = self._find_method_args(name)
             if len(args) > len(arg_names):
                 raise KjException('Too many arguments passed to `%s`. Expected %d and got %d' % (name, len(arg_names), len(args)))
@@ -2192,6 +2222,7 @@ cdef class TwoPartyClient:
             self.thisptr = new RpcSystem(makeRpcClient(deref(self._network.thisptr)))
             self._restorer = None
         else:
+            _warnings.warn('Restorers are deprecated. Please use the new bootstrap methods.', UserWarning)
             self._restorer = _convert_restorer(restorer)
             self.thisptr = new RpcSystem(makeRpcClientWithRestorer(deref(self._network.thisptr), deref(self._restorer.thisptr)))
 
@@ -2204,16 +2235,22 @@ cdef class TwoPartyClient:
         del self.thisptr
 
     cpdef _connect(self, host_string):
-        host, port = host_string.split(':')
+        if host_string.startswith('unix:'):
+            path = host_string[5:]
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.connect(path)
+        else:
+            host, port = host_string.split(':')
 
-        sock = _socket.create_connection((host, port))
+            sock = _socket.create_connection((host, port))
 
-        # Set TCP_NODELAY on socket to disable Nagle's algorithm. This is not
-        # neccessary, but it speeds things up.
-        sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+            # Set TCP_NODELAY on socket to disable Nagle's algorithm. This is not
+            # neccessary, but it speeds things up.
+            sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
         return sock
 
     cpdef restore(self, objectId) except +reraise_kj_exception:
+        _warnings.warn('Restorers are deprecated. Please use the new bootstrap methods.', UserWarning)
         cdef _MessageBuilder builder
         cdef _MessageReader reader
         cdef _DynamicObjectBuilder object_builder
@@ -2253,6 +2290,9 @@ cdef class TwoPartyClient:
 
         return self.restore(ref)
 
+    cpdef bootstrap(self) except +reraise_kj_exception:
+        return _CapabilityClient()._init(helpers.bootstrapHelper(deref(self.thisptr)), self)
+
     cpdef on_disconnect(self) except +reraise_kj_exception:
         return _VoidPromise()._init(deref(self._network.thisptr).onDisconnect())
 
@@ -2263,35 +2303,59 @@ cdef class TwoPartyServer:
     cdef public _Restorer _restorer
     cdef public _AsyncIoStream _stream
     cdef object _port
-    cdef public object port_promise
+    cdef public object port_promise, _bootstrap
     cdef capnp.TaskSet * _task_set
     cdef capnp.ErrorHandler _error_handler
 
-    def __init__(self, socket, restorer, server_socket=None):
-        self._restorer = _convert_restorer(restorer)
+    def __init__(self, socket, restorer=None, server_socket=None, bootstrap=None):
+        if not restorer and not bootstrap:
+            raise KjException("You must provide either a bootstrap interface or a restorer (deperecated) to a server constructor.")
+
+        cdef _InterfaceSchema schema
+        self._restorer = None
+        self._bootstrap = None
+
         if isinstance(socket, basestring):
-            self._connect(socket)
+            self._connect(socket, restorer, bootstrap)
         else:
             self._orig_stream = socket
             self._stream = _FdAsyncIoStream(socket.fileno())
             self._server_socket = server_socket
             self._port = 0
             self._network = _TwoPartyVatNetwork()._init(self._stream, capnp.SERVER)
-            self.thisptr = new RpcSystem(makeRpcServer(deref(self._network.thisptr), deref(self._restorer.thisptr)))
+
+            if bootstrap:
+                self._bootstrap = bootstrap
+                schema = bootstrap.schema
+                self.thisptr = new RpcSystem(makeRpcServerBootstrap(deref(self._network.thisptr), helpers.server_to_client(schema.thisptr, <PyObject *>bootstrap)))
+            elif restorer:
+                _warnings.warn('Restorers are deprecated. Please use the new bootstrap methods.', UserWarning)
+                self._restorer = _convert_restorer(restorer)
+                self.thisptr = new RpcSystem(makeRpcServer(deref(self._network.thisptr), deref(self._restorer.thisptr)))
 
             Py_INCREF(self._orig_stream)
             Py_INCREF(self._stream)
             Py_INCREF(self._restorer)
+            Py_INCREF(self._bootstrap)
             Py_INCREF(self._network)
             self._disconnect_promise = self.on_disconnect().then(self._decref)
 
-    cpdef _connect(self, host_string):
+    cpdef _connect(self, host_string, restorer, bootstrap):
+        cdef _InterfaceSchema schema
         cdef _EventLoop loop = C_DEFAULT_EVENT_LOOP_GETTER()
         cdef capnp.StringPtr temp_string = capnp.StringPtr(<char*>host_string, len(host_string))
         self._task_set = new capnp.TaskSet(self._error_handler)
-        self.port_promise = Promise()._init(helpers.connectServer(deref(self._task_set), deref(self._restorer.thisptr), loop.thisptr, temp_string))
+        if restorer:
+            self._restorer = _convert_restorer(restorer)
+            self.port_promise = Promise()._init(helpers.connectServerRestorer(deref(self._task_set), deref(self._restorer.thisptr), loop.thisptr, temp_string))
+        else:
+            self._bootstrap = bootstrap
+            Py_INCREF(self._bootstrap)
+            schema = bootstrap.schema
+            self.port_promise = Promise()._init(helpers.connectServer(deref(self._task_set), helpers.server_to_client(schema.thisptr, <PyObject *>bootstrap), loop.thisptr, temp_string))
 
     def _decref(self):
+        Py_DECREF(self._bootstrap)
         Py_DECREF(self._restorer)
         Py_DECREF(self._orig_stream)
         Py_DECREF(self._stream)
@@ -2310,6 +2374,9 @@ cdef class TwoPartyServer:
 
         wait_forever()
 
+    cpdef bootstrap(self) except +reraise_kj_exception:
+        return _CapabilityClient()._init(helpers.bootstrapHelperServer(deref(self.thisptr)), self)
+
     property port:
         def __get__(self):
             if self._port is None:
@@ -2317,8 +2384,6 @@ cdef class TwoPartyServer:
                 return self._port
             else:
                 return self._port
-
-    # TODO: add restore functionality here?
 
 cdef class _AsyncIoStream:
     cdef Own[AsyncIoStream] thisptr
@@ -2515,6 +2580,12 @@ cdef class _InterfaceMethod:
             # TODO(soon): make sure this is memory safe
             return _StructSchema()._init(self.thisptr.getParamType())
 
+    property result_type:
+        """The type of this method's result struct"""
+        def __get__(self):
+            # TODO(soon): make sure this is memory safe
+            return _StructSchema()._init(self.thisptr.getResultType())
+
 cdef class _InterfaceSchema:
     cdef _init(self, C_InterfaceSchema other):
         self.thisptr = other
@@ -2681,9 +2752,9 @@ types.Data = _data
 # _list.thisptr = capnp.SchemaType(capnp.TypeWhichLIST)
 # types.list = _list
 
-cdef _SchemaType _enum = _SchemaType()
-_enum.thisptr = capnp.SchemaType(capnp.TypeWhichENUM)
-types.Enum = _enum
+# cdef _SchemaType _enum = _SchemaType()
+# _enum.thisptr = capnp.SchemaType(capnp.TypeWhichENUM)
+# types.Enum = _enum
 
 # cdef _SchemaType _struct = _SchemaType()
 # _struct.thisptr = capnp.SchemaType(capnp.TypeWhichSTRUCT)
@@ -2806,9 +2877,9 @@ class _StructModule(object):
         :param nesting_limit: Limits how many total words of data are allowed to be traversed. Default is 64.
 
         :rtype: :class:`_DynamicStructReader`"""
-        reader = _StreamFdMessageReader(file.fileno(), traversal_limit_in_words, nesting_limit)
+        reader = _StreamFdMessageReader(file, traversal_limit_in_words, nesting_limit)
         return reader.get_root(self.schema)
-    def read_multiple(self, file, traversal_limit_in_words = None, nesting_limit = None):
+    def read_multiple(self, file, traversal_limit_in_words = None, nesting_limit = None, skip_copy = False):
         """Returns an iterable, that when traversed will return Readers for messages.
 
         :type file: file
@@ -2820,8 +2891,11 @@ class _StructModule(object):
         :type nesting_limit: int
         :param nesting_limit: Limits how many total words of data are allowed to be traversed. Default is 64.
 
+        :type skip_copy: bool
+        :param skip_copy: By default, each message is copied because the file needs to advance, even if the message is never read completely. Skip this only if you know what you're doing.
+
         :rtype: Iterable with elements of :class:`_DynamicStructReader`"""
-        reader = _MultipleMessageReader(file.fileno(), self.schema, traversal_limit_in_words, nesting_limit)
+        reader = _MultipleMessageReader(file, self.schema, traversal_limit_in_words, nesting_limit, skip_copy)
         return reader
     def read_packed(self, file, traversal_limit_in_words = None, nesting_limit = None):
         """Returns a Reader for the packed object read from file.
@@ -2836,9 +2910,9 @@ class _StructModule(object):
         :param nesting_limit: Limits how many total words of data are allowed to be traversed. Default is 64.
 
         :rtype: :class:`_DynamicStructReader`"""
-        reader = _PackedFdMessageReader(file.fileno(), traversal_limit_in_words, nesting_limit)
+        reader = _PackedFdMessageReader(file, traversal_limit_in_words, nesting_limit)
         return reader.get_root(self.schema)
-    def read_multiple_packed(self, file, traversal_limit_in_words = None, nesting_limit = None):
+    def read_multiple_packed(self, file, traversal_limit_in_words = None, nesting_limit = None, skip_copy = False):
         """Returns an iterable, that when traversed will return Readers for messages.
 
         :type file: file
@@ -2850,8 +2924,11 @@ class _StructModule(object):
         :type nesting_limit: int
         :param nesting_limit: Limits how many total words of data are allowed to be traversed. Default is 64.
 
+        :type skip_copy: bool
+        :param skip_copy: By default, each message is copied because the file needs to advance, even if the message is never read completely. Skip this only if you know what you're doing.
+
         :rtype: Iterable with elements of :class:`_DynamicStructReader`"""
-        reader = _MultiplePackedMessageReader(file.fileno(), self.schema, traversal_limit_in_words, nesting_limit)
+        reader = _MultiplePackedMessageReader(file, self.schema, traversal_limit_in_words, nesting_limit, skip_copy)
         return reader
     def read_multiple_bytes(self, buf, traversal_limit_in_words = None, nesting_limit = None):
         """Returns an iterable, that when traversed will return Readers for messages.
@@ -2963,6 +3040,23 @@ class _EnumModule(object):
         for name, val in schema.enumerants.items():
             setattr(self, name, val)
 
+cdef class _StringArrayPtr:
+    cdef StringPtr * thisptr
+    cdef object parent
+    cdef size_t size
+
+    def __cinit__(self, size_t size, parent):
+        self.size = size
+        self.thisptr = <StringPtr *>malloc(sizeof(StringPtr) * size)
+        self.parent = parent
+
+    def __dealloc__(self):
+        free(self.thisptr)
+
+    cdef ArrayPtr[StringPtr] asArrayPtr(self) except +reraise_kj_exception:
+        return ArrayPtr[StringPtr](self.thisptr, self.size)
+
+
 cdef class SchemaParser:
     """A class for loading Cap'n Proto schema files.
 
@@ -2970,26 +3064,34 @@ cdef class SchemaParser:
     """
     cdef C_SchemaParser * thisptr
     cdef public dict modules_by_id
+    cdef list _all_imports
+    cdef _StringArrayPtr _last_import_array
 
     def __cinit__(self):
         self.thisptr = new C_SchemaParser()
         self.modules_by_id = {}
+        self._all_imports = []
 
     def __dealloc__(self):
         del self.thisptr
 
     cpdef _parse_disk_file(self, displayName, diskPath, imports) except +reraise_kj_exception:
-        cdef StringPtr * importArray = <StringPtr *>malloc(sizeof(StringPtr) * len(imports))
+        cdef _StringArrayPtr importArray
 
-        for i in range(len(imports)):
-            importArray[i] = StringPtr(imports[i])
+        if self._last_import_array and self._last_import_array.parent == imports:
+            importArray = self._last_import_array
+        else:
+            importArray = _StringArrayPtr(len(imports), imports)
 
-        cdef ArrayPtr[StringPtr] importsPtr = ArrayPtr[StringPtr](importArray, <size_t>len(imports))
+            for i in range(len(imports)):
+                curr_import = imports[i]
+                importArray.thisptr[i] = StringPtr(curr_import, <size_t>len(curr_import))
+
+            self._all_imports.append(importArray)
+            self._last_import_array = importArray
 
         ret = _ParsedSchema()
-        ret._init_child(self.thisptr.parseDiskFile(displayName, diskPath, importsPtr))
-
-        free(importArray)
+        ret._init_child(self.thisptr.parseDiskFile(displayName, diskPath, importArray.asArrayPtr()))
 
         return ret
 
@@ -3229,8 +3331,7 @@ cdef class _MessageReader:
     """
     cdef public object _parent
     cdef schema_cpp.MessageReader * thisptr
-    def __dealloc__(self):
-        del self.thisptr
+
     def __init__(self):
         raise NotImplementedError("This is an abstract base class")
 
@@ -3274,21 +3375,27 @@ cdef class _StreamFdMessageReader(_MessageReader):
     You use this class to for reading message(s) from a file. It's analagous to the inverse of :func:`_write_message_to_fd` and :class:`_MessageBuilder`, but in one class::
 
         f = open('out.txt')
-        message = _StreamFdMessageReader(f.fileno())
+        message = _StreamFdMessageReader(f)
         person = message.get_root(addressbook.Person)
         print person.name
 
     :Parameters: - fd (`int`) - A file descriptor
     """
-    def __init__(self, int fd, traversal_limit_in_words = None, nesting_limit = None):
+    def __init__(self, file, traversal_limit_in_words = None, nesting_limit = None):
         cdef schema_cpp.ReaderOptions opts
+
+        self._parent = file
 
         if traversal_limit_in_words is not None:
             opts.traversalLimitInWords = traversal_limit_in_words
         if nesting_limit is not None:
             opts.nestingLimit = nesting_limit
 
-        self.thisptr = new schema_cpp.StreamFdMessageReader(fd, opts)
+        self.thisptr = new schema_cpp.StreamFdMessageReader(file.fileno(), opts)
+
+    def __dealloc__(self):
+        del self.thisptr
+
 
 cdef class _PackedMessageReader(_MessageReader):
     """Read a Cap'n Proto message from a file descriptor in a packed manner
@@ -3296,7 +3403,7 @@ cdef class _PackedMessageReader(_MessageReader):
     You use this class to for reading message(s) from a file. It's analagous to the inverse of :func:`_write_packed_message_to_fd` and :class:`_MessageBuilder`, but in one class.::
 
         f = open('out.txt')
-        message = _PackedFdMessageReader(f.fileno())
+        message = _PackedFdMessageReader(f)
         person = message.get_root(addressbook.Person)
         print person.name
 
@@ -3317,6 +3424,10 @@ cdef class _PackedMessageReader(_MessageReader):
 
         self.thisptr = new schema_cpp.PackedMessageReader(stream, opts)
         return self
+
+    def __dealloc__(self):
+        del self.thisptr
+
 
 cdef class _PackedMessageReaderBytes(_MessageReader):
     cdef schema_cpp.ArrayInputStream * stream
@@ -3340,6 +3451,7 @@ cdef class _PackedMessageReaderBytes(_MessageReader):
         self.thisptr = new schema_cpp.PackedMessageReader(deref(self.stream), opts)
 
     def __dealloc__(self):
+        del self.thisptr
         del self.stream
 
 cdef class _InputMessageReader(_MessageReader):
@@ -3348,7 +3460,7 @@ cdef class _InputMessageReader(_MessageReader):
     You use this class to for reading message(s) from a file. It's analagous to the inverse of :func:`_write_packed_message_to_fd` and :class:`_MessageBuilder`, but in one class.::
 
         f = open('out.txt')
-        message = _PackedFdMessageReader(f.fileno())
+        message = _PackedFdMessageReader(f)
         person = message.get_root(addressbook.Person)
         print person.name
 
@@ -3370,40 +3482,53 @@ cdef class _InputMessageReader(_MessageReader):
         self.thisptr = new schema_cpp.InputStreamMessageReader(stream, opts)
         return self
 
+    def __dealloc__(self):
+        del self.thisptr
+
+
 cdef class _PackedFdMessageReader(_MessageReader):
     """Read a Cap'n Proto message from a file descriptor in a packed manner
 
     You use this class to for reading message(s) from a file. It's analagous to the inverse of :func:`_write_packed_message_to_fd` and :class:`_MessageBuilder`, but in one class.::
 
         f = open('out.txt')
-        message = _PackedFdMessageReader(f.fileno())
+        message = _PackedFdMessageReader(f)
         person = message.get_root(addressbook.Person)
         print person.name
 
     :Parameters: - fd (`int`) - A file descriptor
     """
-    def __init__(self, int fd, traversal_limit_in_words = None, nesting_limit = None):
+    def __init__(self, file, traversal_limit_in_words = None, nesting_limit = None):
         cdef schema_cpp.ReaderOptions opts
+
+        self._parent = file
 
         if traversal_limit_in_words is not None:
             opts.traversalLimitInWords = traversal_limit_in_words
         if nesting_limit is not None:
             opts.nestingLimit = nesting_limit
 
-        self.thisptr = new schema_cpp.PackedFdMessageReader(fd, opts)
+        self.thisptr = new schema_cpp.PackedFdMessageReader(file.fileno(), opts)
+
+    def __dealloc__(self):
+        del self.thisptr
+
 
 cdef class _MultipleMessageReader:
     cdef schema_cpp.FdInputStream * stream
     cdef schema_cpp.BufferedInputStream * buffered_stream
+    cdef cbool skip_copy
 
-    cdef public object traversal_limit_in_words, nesting_limit, schema
+    cdef public object traversal_limit_in_words, nesting_limit, schema, file
 
-    def __init__(self, int fd, schema, traversal_limit_in_words = None, nesting_limit = None):
+    def __init__(self, file, schema, traversal_limit_in_words = None, nesting_limit = None, skip_copy = False):
+        self.file = file
         self.schema = schema
         self.traversal_limit_in_words = traversal_limit_in_words
         self.nesting_limit = nesting_limit
+        self.skip_copy = skip_copy
 
-        self.stream = new schema_cpp.FdInputStream(fd)
+        self.stream = new schema_cpp.FdInputStream(file.fileno())
         self.buffered_stream = new schema_cpp.BufferedInputStreamWrapper(deref(self.stream))
 
     def __dealloc__(self):
@@ -3413,7 +3538,10 @@ cdef class _MultipleMessageReader:
     def __next__(self):
         try:
             reader = _InputMessageReader()._init(deref(self.buffered_stream), self.traversal_limit_in_words, self.nesting_limit, self)
-            return reader.get_root(self.schema)
+            ret = reader.get_root(self.schema)
+            if not self.skip_copy:
+              ret = ret.as_builder().as_reader()
+            return ret
         except KjException as e:
             if 'EOF' in str(e):
                 raise StopIteration
@@ -3426,15 +3554,18 @@ cdef class _MultipleMessageReader:
 cdef class _MultiplePackedMessageReader:
     cdef schema_cpp.FdInputStream * stream
     cdef schema_cpp.BufferedInputStream * buffered_stream
+    cdef cbool skip_copy
 
-    cdef public object traversal_limit_in_words, nesting_limit, schema
+    cdef public object traversal_limit_in_words, nesting_limit, schema, file
 
-    def __init__(self, int fd, schema, traversal_limit_in_words = None, nesting_limit = None):
+    def __init__(self, file, schema, traversal_limit_in_words = None, nesting_limit = None, skip_copy = False):
+        self.file = file
         self.schema = schema
         self.traversal_limit_in_words = traversal_limit_in_words
         self.nesting_limit = nesting_limit
+        self.skip_copy = skip_copy
 
-        self.stream = new schema_cpp.FdInputStream(fd)
+        self.stream = new schema_cpp.FdInputStream(file.fileno())
         self.buffered_stream = new schema_cpp.BufferedInputStreamWrapper(deref(self.stream))
 
     def __dealloc__(self):
@@ -3444,7 +3575,10 @@ cdef class _MultiplePackedMessageReader:
     def __next__(self):
         try:
             reader = _PackedMessageReader()._init(deref(self.buffered_stream), self.traversal_limit_in_words, self.nesting_limit, self)
-            return reader.get_root(self.schema)
+            ret = reader.get_root(self.schema)
+            if not self.skip_copy:
+              ret = ret.as_builder().as_reader()
+            return ret
         except KjException as e:
             if 'EOF' in str(e):
                 raise StopIteration
@@ -3574,6 +3708,10 @@ cdef class _FlatArrayMessageReader(_MessageReader):
 
         self.thisptr = new schema_cpp.FlatArrayMessageReader(schema_cpp.WordArrayPtr(<schema_cpp.word*>ptr, sz//8))
 
+    def __dealloc__(self):
+        del self.thisptr
+
+
 @cython.internal
 cdef class _FlatMessageBuilder(_MessageBuilder):
     cdef object _object_to_pin
@@ -3614,7 +3752,7 @@ def _write_message_to_fd(int fd, _MessageBuilder message):
         _write_message_to_fd(f.fileno(), message)
         ...
         f = open('out.txt')
-        _StreamFdMessageReader(f.fileno())
+        _StreamFdMessageReader(f)
 
     :type fd: int
     :param fd: A file descriptor
@@ -3640,7 +3778,7 @@ def _write_packed_message_to_fd(int fd, _MessageBuilder message):
         _write_packed_message_to_fd(f.fileno(), message)
         ...
         f = open('out.txt')
-        _PackedFdMessageReader(f.fileno())
+        _PackedFdMessageReader(f)
 
     :type fd: int
     :param fd: A file descriptor
